@@ -1,0 +1,36 @@
+# --- Cadence tool junk ---
+*.log
+*.cmd
+*.cmd.*
+INNOVUS*/
+genus.log
+fv/
+*.db
+*.def.gz
+*.spef.gz
+work/
+LOG/
+save.tcl
+*.rpt.bak
+.Xil/
+.cadence/
+
+# --- Python ---
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+.venv/
+*.egg-info/
+
+# --- Data / model artifacts (large; regenerate via scripts, or use Git LFS) ---
+data/raw_reports/*
+!data/raw_reports/.gitkeep
+data/graphs/*
+!data/graphs/.gitkeep
+results/trained_models/*
+!results/trained_models/.gitkeep
+
+# --- OS ---
+.DS_Store
+Thumbs.db
