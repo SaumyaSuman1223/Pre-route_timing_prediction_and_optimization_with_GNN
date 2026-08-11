@@ -28,8 +28,13 @@ data/raw_reports/*
 !data/raw_reports/.gitkeep
 data/graphs/*
 !data/graphs/.gitkeep
+data/external/*
+!data/external/.gitkeep
 results/trained_models/*
 !results/trained_models/.gitkeep
+
+# --- External code clones (CircuitNet repo, etc. — not our code) ---
+external/
 
 # --- OS ---
 .DS_Store
