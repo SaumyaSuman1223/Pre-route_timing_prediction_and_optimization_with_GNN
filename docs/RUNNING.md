@@ -115,6 +115,43 @@ all, and `--max-eval` caps val/test.
 **Slow epochs** — the bottleneck is CPU-side loading and tiling, not the GPU. Fewer,
 larger tiles (`--parts 9`) speeds things up if memory allows.
 
+## GPU performance — what was measured
+
+Benchmarked on the RTX 3050 6GB, 64 tiles / 469k nodes / 3.5M edges.
+
+Where a training step goes: **70% GPU**, 14% `torch.load` + normalize, 12%
+`spatial_partition`, 4% host→device copy.
+
+**What helped:**
+
+| Change | Effect |
+|---|---|
+| Background prefetch of the next graph | **1.20x** (7.17s → 5.97s) — in the code, always on |
+
+**What did not help, and why:**
+
+| Tried | Result |
+|---|---|
+| TF32 on Ampere | no change |
+| bf16 autocast | **slower** (1.42s vs 1.28s) |
+| Larger tiles (`--parts 4`) | no faster, 2.9x the memory (1.66 GB vs 0.58 GB) |
+
+Message passing is **gather/scatter bandwidth-bound, not matmul-bound**, so mixed
+precision has almost nothing to accelerate and only adds cast overhead. Do not expect
+AMP to help here; it was tried.
+
+**What actually scales runtime** is hidden width and total edge count:
+
+| Setting | Time | Params | Peak memory |
+|---|---|---|---|
+| `--hidden 64` | 0.72s | 23,684 | 0.38 GB |
+| `--hidden 128` | 1.27s | 88,324 | 0.58 GB |
+| `--hidden 256` | 2.34s | 340,484 | 0.96 GB |
+
+`--heads` barely matters (2 → 8 is 1.19s → 1.34s). Peak memory at the recommended
+settings is 0.58 GB of your 6 GB, so there is plenty of headroom to go wider if the
+accuracy justifies the time.
+
 ## Useful flags
 
 | Flag | Default | What it does |

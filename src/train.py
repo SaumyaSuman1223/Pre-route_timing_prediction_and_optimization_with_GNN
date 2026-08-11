@@ -18,6 +18,8 @@ import argparse
 import json
 import random
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -101,6 +103,44 @@ def split(
     raise SystemExit(f"unknown protocol {protocol}")
 
 
+def graph_stream(files, norm, parts, x_col, y_col, shuffle_tiles=True, prefetch=2):
+    """
+    Yield the spatial tiles of each graph, loading and tiling the NEXT graph on a
+    background thread while the GPU works on the current one.
+
+    Measured split of a training step before this existed: 70% GPU, 14% torch.load +
+    normalize, 12% spatial_partition, 4% host->device copy. The CPU quarter is pure
+    stall, and torch.load / numpy release the GIL, so one worker thread recovers part of
+    it: measured 1.20x end-to-end (7.17s -> 5.97s over 16 graphs, page cache warm).
+
+    This is the ONLY optimisation here that helped. TF32, bf16 autocast and larger tiles
+    were each benchmarked and none of them did -- message passing is gather/scatter
+    bandwidth-bound, not matmul-bound, so the usual mixed-precision levers do nothing and
+    bf16 is actually slower for the cast overhead. Runtime scales with hidden width and
+    total edge count; those are the real knobs. See docs/RUNNING.md.
+    """
+
+    def prepare(f):
+        g = norm(torch.load(f, weights_only=False))
+        p = spatial_partition(g, parts, x_col, y_col)
+        del g
+        return p
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = deque()
+        files = list(files)
+        for f in files[:prefetch]:
+            pending.append(pool.submit(prepare, f))
+        for i in range(len(files)):
+            tiles = pending.popleft().result()
+            if i + prefetch < len(files):
+                pending.append(pool.submit(prepare, files[i + prefetch]))
+            if shuffle_tiles:
+                random.shuffle(tiles)
+            yield tiles
+            del tiles
+
+
 class Normalizer:
     """z-score, fitted on TRAIN graphs only and then frozen."""
 
@@ -153,17 +193,17 @@ def evaluate(model, files, norm, args, device) -> dict:
     x_col, y_col = names.index("driver_x"), names.index("driver_y")
 
     preds, trues, bases = [], [], []
-    for f in files:
-        g = norm(torch.load(f, weights_only=False))
-        for part in spatial_partition(g, args.parts, x_col, y_col):
-            part = part.to(device)
+    for parts in graph_stream(
+        files, norm, args.parts, x_col, y_col, shuffle_tiles=False, prefetch=args.prefetch
+    ):
+        for part in parts:
+            part = part.to(device, non_blocking=True)
             out = model(part.x, part.edge_index, part.edge_attr)
             preds.append(out.cpu())
             trues.append(part.y.cpu())
             # undo normalisation on the pre-route columns to recover the raw estimate
             base = part.x[:, pre_cols].cpu() * norm.x_std[pre_cols] + norm.x_mean[pre_cols]
             bases.append(base)
-        del g
 
     pred, true, base = torch.cat(preds), torch.cat(trues), torch.cat(bases)
     return {
@@ -206,6 +246,13 @@ def main() -> None:
     )
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--parts", type=int, default=16, help="spatial tiles per graph")
+    p.add_argument(
+        "--prefetch",
+        type=int,
+        default=2,
+        help="graphs held in flight by the loader thread; lower to 1 if host RAM is tight "
+        "(one nvdla graph peaks ~0.9 GB through partitioning)",
+    )
     p.add_argument("--hidden", type=int, default=64)
     p.add_argument("--heads", type=int, default=4)
     p.add_argument("--layers", type=int, default=3)
@@ -219,6 +266,8 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     cached = load_cached(args.cache, args.designs, args.raw, args.allow_partial_cache)
@@ -265,12 +314,9 @@ def main() -> None:
         t0, tot, nb = time.time(), 0.0, 0
         order = list(train_f)
         random.shuffle(order)
-        for f in order:
-            g = norm(torch.load(f, weights_only=False))
-            parts = spatial_partition(g, args.parts, x_col, y_col)
-            random.shuffle(parts)
+        for parts in graph_stream(order, norm, args.parts, x_col, y_col, prefetch=args.prefetch):
             for part in parts:
-                part = part.to(device)
+                part = part.to(device, non_blocking=True)
                 opt.zero_grad()
                 out = model(part.x, part.edge_index, part.edge_attr)
                 loss = F.mse_loss(out, part.y)
@@ -279,7 +325,6 @@ def main() -> None:
                 opt.step()
                 tot += loss.item()
                 nb += 1
-            del g, parts
 
         val = evaluate(model, val_f, norm, args, device)
         val_mse = float(np.mean(val["model_mse"]))
