@@ -133,6 +133,16 @@ stages, so some fields may be zero/placeholder during Phase A prototyping and on
 become real once we're on our own Cadence data in Phase B. Note explicitly in code
 comments wherever a feature is a Phase-A placeholder.
 
+> **UPDATE (2026-08-11) — see [`docs/phase_a_feature_spec.md`](docs/phase_a_feature_spec.md).**
+> The `net_edges` format is now decoded and verified: cols 0–1 are src/dst pin index,
+> cols 2–5 are 4-channel net delay. The gap is much larger than "some fields may be
+> zero": CircuitNet has **no net R, no net C, no RUDY, no via counts, and no cell/arc
+> edges at all**. Rather than zero-pad the schema above (which would train the models on
+> mostly-constant columns and invalidate them at the Phase-B swap), Phase A uses a
+> reduced, honestly-populated feature set with net *delay* as the Level-1 target. The
+> spec doc defines it and maps it back onto this section for Phase B. Section 4 here
+> remains the paper/Phase-B target.
+
 ---
 
 ## 5. Paper section → code file map
@@ -154,13 +164,43 @@ comments wherever a feature is a Phase-A placeholder.
 ## 6. Status checklist
 
 **Phase A — CircuitNet prototyping**
-- [ ] CircuitNet-N14 downloaded, timing tarballs extracted
-- [ ] `build_graph.py` run once as a reference, output inspected
-- [ ] `src/data/dataset.py`: `load_circuitnet()` implemented, normalized to schema (Sec. 4)
-- [ ] `src/models/net_arc_conv.py`: custom GAT-based net/arc message passing implemented
-- [ ] `src/models/stage1_model.py`: trains and evaluates on CircuitNet
-- [ ] `src/models/stage2_model.py`: trains and evaluates on CircuitNet, consuming Stage 1 predictions
+- [x] CircuitNet-N14 downloaded, timing tarballs extracted — Vortex-small (96 usable
+      configs) and nvdla-small (77 usable; the tarball itself is missing route and
+      pin_position files for 19). **173 usable graphs.** See
+      [`docs/dataset_summary.md`](docs/dataset_summary.md).
+- [x] `build_graph.py` decoded as a reference, feature semantics verified — see
+      [`docs/phase_a_feature_spec.md`](docs/phase_a_feature_spec.md)
+- [x] Phase-A feature spec signed off (decisions D1–D5 resolved 2026-08-11)
+- [x] `src/data/dataset.py`: `load_circuitnet()` implemented (in `circuitnet.py`, re-exported),
+      normalized to the Phase-A schema in `src/data/feature_spec.py`. Verified on both
+      designs: ~15s/config, avg degree 8.3–8.6, 2.5–3.5% isolated nets, no NaNs.
+- [x] Cache all 173 configs to `data/graphs/` (`python -m src.data.build_cache`, ~6s each,
+      ~55 MB per graph, ~10 GB total)
+- [x] `src/models/net_arc_conv.py`: GAT layer with edge-feature-conditioned attention
+      (paper Eq. 2–5), shared by both levels
+- [x] `src/data/partition.py`: spatial tiling — no METIS backend is installed, and
+      bbox-overlap edges are spatially local anyway (90.7% edge retention at 16 tiles)
+- [x] `src/models/stage1_model.py` + `src/train.py`: trains and evaluates on CircuitNet,
+      both protocols, always reported against the identity baseline
+- [ ] Full-cache retrain (the result below used 31 of 96 Vortex configs — cache was
+      still building) + the `unseen-design` protocol against nvdla-small
+- [ ] `src/models/stage2_model.py`: needs arc-graph construction first (synthesize cell
+      arcs from instance prefixes in pin names — CircuitNet ships no cell edges)
 - [ ] `src/models/baseline_single_stage.py`: implemented, evaluated for the core ablation
+
+### First Level-1 result (2026-08-11)
+
+`python -m src.train --designs Vortex-small --epochs 25 --hidden 128 --heads 4 --parts 16`
+23 train / 4 val / 4 test graphs, 88,324 parameters, ~13s/epoch on an RTX 3050.
+
+| | model | identity baseline | delta |
+|---|---|---|---|
+| R² (mean of 4 channels) | **0.9129** | 0.8654 | **+0.0475** |
+| MAE (log space) | **0.2807** | 0.2955 | **−0.0148** |
+
+Per-channel R²: 0.920 / 0.918 / 0.908 / 0.906 vs baseline 0.873 / 0.875 / 0.856 / 0.858.
+Test set = 469,128 held-out nets. The model beats the pre-route estimate on every
+channel, on both metrics. Not yet a paper-level claim — one design, unseen-config only.
 
 **Phase B — real Cadence data**
 - [ ] `learning/01`–`03` mini-projects complete (STA basics, synthesis sweep, pre/post-route comparison)
@@ -178,10 +218,24 @@ comments wherever a feature is a Phase-A placeholder.
 
 - Training hyperparameters (learning rate, optimizer, epochs, batch size) — NOT stated
   in the paper. Decide empirically; log final choices here once settled.
+  *(In use so far: Adam, lr 1e-3, MSE in log space, grad-clip 1.0, 3 layers, 4 heads,
+  hidden 64–128, one spatial tile per optimizer step. Head count and hidden width are
+  also unstated by the paper.)*
+- **The identity baseline is the number to beat.** Using the pre-route estimate unchanged
+  already gives R² ≈ 0.84 / MAE ≈ 0.31 on this data. Any Level-1 result must be quoted
+  next to it — `src/train.py` computes both on the same nets, every evaluation.
 - Exact training loss function — implied MSE (matches their eval metric) but never
   explicitly stated as the training objective. Using MSE unless a reason emerges not to.
 - XGBoost margin-function (A, B, C) training details are thin in the paper (§4) — not
   needed since Section 4 is out of scope for us.
+
+---
+
+## 7b. How to run it
+
+All commands, in order, with troubleshooting: [`docs/RUNNING.md`](docs/RUNNING.md).
+Short version — `python -m src.data.build_cache` once, then
+`python -m src.train --designs Vortex-small --epochs 25 --hidden 128 --parts 16`.
 
 ---
 

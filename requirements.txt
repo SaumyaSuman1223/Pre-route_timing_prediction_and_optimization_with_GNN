@@ -1,8 +1,18 @@
-torch
-torch_geometric
-networkx
-numpy
-pandas
-matplotlib
-scikit-learn
+# Versions are the ones this project is known to run on (Python 3.10, CUDA 12.4).
+# torch is NOT pinned to a CUDA build here -- install the wheel matching your driver
+# from https://pytorch.org first, then `pip install -r requirements.txt`.
+torch>=2.6
+torch_geometric>=2.8
+
+numpy>=2.2
+pandas>=2.3
+matplotlib>=3.10
+scikit-learn>=1.7
+networkx>=3.4
 jupyter
+
+# Phase A only: fetching CircuitNet-N14 from Hugging Face
+huggingface_hub>=1.0
+
+# NOTE: no METIS backend (torch-sparse / pyg-lib / pymetis) is required.
+# src/data/partition.py uses spatial tiling instead -- see its module docstring.
